@@ -45,19 +45,27 @@ impl Ball {
     }
 
     pub fn move_from(&mut self, other: &Self) {
-        let bounce = 0.5;
+        let bounce = 0.05;
+        let jump = 0.6;
 
         let dx = self.point.x - other.point.x;
         let dy = self.point.y - other.point.y;
         let angle = dy.atan2(dx);
 
         let dist = (dx.powi(2) + dy.powi(2)).sqrt();
-        let force = (self.radius + other.radius - dist) * bounce;
+        let force = self.radius + other.radius - dist;
 
         let x = angle.cos() * force;
         let y = angle.sin() * force;
-        self.velocity.x += x;
-        self.velocity.y += y;
+        self.velocity.x += x * bounce * self.get_bounce_amount();
+        self.velocity.y += y * bounce * self.get_bounce_amount();
+        self.point.x += x * jump;
+        self.point.y += y * jump;
+    }
+
+    pub fn get_bounce_amount(&self) -> f32 {
+        let bounce_mass_falloff = 0.05;
+        1.0 / (self.radius * bounce_mass_falloff).max(1.0)
     }
 }
 
@@ -75,6 +83,7 @@ impl App {
         for _ in 0..10 {
             balls.push(Ball::new_random(&mut rng, width, height));
         }
+        sort_balls_by_size(&mut balls);
 
         Self {
             balls,
@@ -95,6 +104,25 @@ impl App {
             ball.velocity = Vector2 { x: vx, y: vy };
         }
     }
+
+    fn is_active_ball(&self, index: usize) -> bool {
+        if let Some((i, _)) = self.active_ball {
+            if i == index {
+                return true;
+            }
+        }
+        false
+    }
+
+    fn add_ball(&mut self, ball: Ball) {
+        self.balls.push(ball);
+        sort_balls_by_size(&mut self.balls);
+    }
+}
+
+/// Sort list of balls largest to smallest
+fn sort_balls_by_size(balls: &mut Vec<Ball>) {
+    balls.sort_by(|a, b| b.radius.partial_cmp(&a.radius).unwrap());
 }
 
 impl EventHandler for App {
@@ -102,17 +130,30 @@ impl EventHandler for App {
         let (width, height) = ctx.gfx.drawable_size();
 
         let bounce_amount = 0.5;
-        let bounce_mass_falloff = 0.05;
 
         for i in 0..self.balls.len() {
+            if self.is_active_ball(i) {
+                continue;
+            }
             let ball = &mut self.balls[i];
             if ball.point.y + ball.radius < height {
-                match self.active_ball {
-                    Some((b, _)) if b == i => (),
-                    _ => ball.velocity.y += 0.5,
-                }
+                ball.velocity.y += 0.5
             }
+        }
 
+        for i in 0..self.balls.len() {
+            if self.is_active_ball(i) {
+                continue;
+            }
+            let ball = &mut self.balls[i];
+            ball.point.x += ball.velocity.x;
+            ball.point.y += ball.velocity.y;
+        }
+
+        for i in 0..self.balls.len() {
+            if self.is_active_ball(i) {
+                continue;
+            }
             for j in 0..self.balls.len() {
                 if i == j {
                     continue;
@@ -128,24 +169,18 @@ impl EventHandler for App {
         }
 
         for ball in &mut self.balls {
-            ball.point.x += ball.velocity.x;
-            ball.point.y += ball.velocity.y;
-
             if ball.point.x - ball.radius < 0.0 {
                 ball.point.x = ball.radius;
-                ball.velocity.x *= -bounce_amount;
-                ball.velocity.x /= (ball.radius * bounce_mass_falloff).max(1.0);
+                ball.velocity.x *= -bounce_amount * ball.get_bounce_amount();
             }
             if ball.point.x + ball.radius >= width {
                 ball.point.x = width - ball.radius;
-                ball.velocity.x *= -bounce_amount;
-                ball.velocity.x /= (ball.radius * bounce_mass_falloff).max(1.0);
+                ball.velocity.x *= -bounce_amount * ball.get_bounce_amount();
             }
 
             if ball.point.y + ball.radius >= height {
                 ball.point.y = height - ball.radius;
-                ball.velocity.y *= -bounce_amount;
-                ball.velocity.y /= (ball.radius * bounce_mass_falloff).max(1.0);
+                ball.velocity.y *= -bounce_amount * ball.get_bounce_amount();
             }
         }
 
@@ -189,23 +224,23 @@ impl EventHandler for App {
         x: f32,
         y: f32,
     ) -> Result<(), ggez::GameError> {
-        // Get smallest ball, which mouse is touching
-        let mut colliding_balls = Vec::new();
-        for (i, ball) in self.balls.iter().enumerate() {
-            if ball.collides_point(Point2 { x, y }) {
-                colliding_balls.push((i, ball));
-            }
+        if self.active_ball.is_some() {
+            return Ok(());
         }
-        colliding_balls.sort_by(|(_, a), (_, b)| a.radius.partial_cmp(&b.radius).unwrap());
-        if let Some((i, ball)) = colliding_balls.first() {
-            self.active_ball = Some((
-                *i,
-                Point2 {
-                    x: x - ball.point.x,
-                    y: y - ball.point.y,
-                },
-            ));
-            self.move_active_ball(x, y, 0.0, 0.0);
+        // Reverse to be sorted smallest to largest
+        for i in (0..self.balls.len()).rev() {
+            let ball = &self.balls[i];
+            if ball.collides_point(Point2 { x, y }) {
+                self.active_ball = Some((
+                    i,
+                    Point2 {
+                        x: x - ball.point.x,
+                        y: y - ball.point.y,
+                    },
+                ));
+                self.move_active_ball(x, y, 0.0, 0.0);
+                break;
+            }
         }
 
         Ok(())
@@ -239,8 +274,7 @@ impl EventHandler for App {
                 self.reset(ctx);
             }
             VirtualKeyCode::Space => {
-                self.balls
-                    .push(Ball::new_random(&mut rand::thread_rng(), width, height))
+                self.add_ball(Ball::new_random(&mut rand::thread_rng(), width, height))
             }
             VirtualKeyCode::X => {
                 if let Some((i, _)) = self.active_ball {
